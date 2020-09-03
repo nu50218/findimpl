@@ -99,16 +99,14 @@ func getInterface(pass *analysis.Pass) (*types.Interface, error) {
 		return nil, err
 	}
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, buildPkg.Dir, nil, parser.Mode(0))
+	pkgs, err := parser.ParseDir(pass.Fset, buildPkg.Dir, nil, parser.Mode(0))
 	if err != nil {
 		return nil, err
 	}
-	// hoge
-	if _, ok := pkgs[buildPkg.Name]; !ok {
+	pkg, ok := pkgs[buildPkg.Name]
+	if !ok {
 		return nil, errors.New("unexpected")
 	}
-	pkg := pkgs[buildPkg.Name]
 
 	files := make([]*ast.File, 0, len(pkg.Files))
 	for _, f := range pkg.Files {
@@ -120,26 +118,46 @@ func getInterface(pass *analysis.Pass) (*types.Interface, error) {
 		Importer: importer.Default(),
 	}
 	info := &types.Info{
-		Types: map[ast.Expr]types.TypeAndValue{},
+		// TODO: 適切なやつだけ初期化する
+		Types:      map[ast.Expr]types.TypeAndValue{},
+		Defs:       map[*ast.Ident]types.Object{},
+		Uses:       map[*ast.Ident]types.Object{},
+		Implicits:  map[ast.Node]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Scopes:     map[ast.Node]*types.Scope{},
+		InitOrder:  nil,
 	}
-	if _, err := c.Check(buildPkg.ImportPath, fset, files, info); err != nil {
+	if _, err := c.Check(buildPkg.ImportPath, pass.Fset, files, info); err != nil {
 		return nil, err
 	}
 
-	for _, tv := range info.Types {
-		named, _ := tv.Type.(*types.Named)
-		if named == nil {
-			continue
-		}
-		if named.Obj().Name() != targetInterfaceName {
-			continue
-		}
+	for _, f := range pkg.Files {
+		for _, d := range f.Decls {
+			gd, _ := d.(*ast.GenDecl)
+			if gd == nil {
+				continue
+			}
+			if gd.Tok != token.TYPE {
+				continue
+			}
+			ts := gd.Specs[0].(*ast.TypeSpec)
+			if ts.Name.Name != targetInterfaceName {
+				continue
+			}
 
-		i, _ := named.Underlying().(*types.Interface)
-		if i == nil {
-			return nil, fmt.Errorf("%s is not interface", target)
+			i, _ := info.TypeOf(ts.Name).(*types.Named)
+			for {
+				// もとのinterfaceを持ってくる
+				switch u := i.Underlying().(type) {
+				case (*types.Interface):
+					return u, nil
+				case (*types.Named):
+					i = u
+				default:
+					return nil, fmt.Errorf("%s is not interface", targetInterfaceName)
+				}
+			}
 		}
-		return i, nil
 	}
 
 	return nil, fmt.Errorf("%s not found", target)
